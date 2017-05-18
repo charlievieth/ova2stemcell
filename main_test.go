@@ -1,8 +1,12 @@
 package main
 
 import (
+	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -46,5 +50,106 @@ func TestValidateOutputDir(t *testing.T) {
 	filename := filepath.Join(wd, "main.go")
 	if err := ValidateOutputDir(filename); err == nil {
 		t.Error(err)
+	}
+}
+
+func readdirnames(dirname string) ([]string, error) {
+	f, err := os.Open(dirname)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func TestExtractOVA_Valid(t *testing.T) {
+	const Count = 9
+	const NameFmt = "file-%d"
+
+	tmpdir, err := ioutil.TempDir("", "test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpdir)
+
+	if err := ExtractOVA("testdata/valid.tar", tmpdir); err != nil {
+		t.Fatal(err)
+	}
+
+	var expFileNames []string
+	for i := 0; i <= Count; i++ {
+		expFileNames = append(expFileNames, fmt.Sprintf("file-%d", i))
+	}
+	sort.Strings(expFileNames)
+
+	names, err := readdirnames(tmpdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(expFileNames, names) {
+		t.Errorf("ExtractOVA: filenames want: %v got: %v", expFileNames, names)
+	}
+
+	// the content of each file is it's index
+	// and a newline so 'file-2' contains "2\n"
+	validFile := func(name string) error {
+		path := filepath.Join(tmpdir, name)
+		b, err := ioutil.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var i int
+		if _, err := fmt.Sscanf(name, NameFmt, &i); err != nil {
+			return err
+		}
+		exp := fmt.Sprintf("%d\n", i)
+		if s := string(b); s != exp {
+			t.Errorf("ExtractOVA: file (%s) want: %s got: %s", name, exp, s)
+		}
+		return nil
+	}
+
+	for _, name := range names {
+		if err := validFile(name); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestExtractOVA_Invalid(t *testing.T) {
+	var tests = []struct {
+		archive string
+		reason  string
+	}{
+		{
+			"testdata/has-sub-dir.tar",
+			"subdirectories are not supported",
+		},
+		{
+			"testdata/too-many-files.tar",
+			"too many files read from archive (this is capped at 100)",
+		},
+		{
+			"testdata/symlinks.tar",
+			"symlinks are not supported",
+		},
+	}
+
+	for _, x := range tests {
+		tmpdir, err := ioutil.TempDir("", "test-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(tmpdir)
+
+		if err := ExtractOVA(x.archive, tmpdir); err == nil {
+			t.Errorf("ExtractOVA (%s): expected error because:", x.archive, x.reason)
+		}
 	}
 }

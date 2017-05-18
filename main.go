@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha1"
 	"errors"
@@ -11,11 +12,14 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/charlievieth/ova2stemcell/rdiff"
 )
 
 var (
@@ -24,6 +28,8 @@ var (
 	EnableDebug bool
 	OvaFile     string
 	OvfDir      string
+	VHDFile     string
+	DeltaFile   string
 )
 
 var Debugf = func(format string, a ...interface{}) {}
@@ -52,8 +58,10 @@ func init() {
 		flag.PrintDefaults()
 	}
 
-	flag.StringVar(&OvaFile, "ova", "", "Path to OVA file")
-	flag.StringVar(&OvfDir, "ovf", "", "Directory containing OVF package")
+	flag.StringVar(&VHDFile, "vhd", "", "Path to initial VHD file to patch")
+
+	flag.StringVar(&DeltaFile, "delta", "", "Path to deltafile that will be applied to the VHD")
+	flag.StringVar(&DeltaFile, "d", "", "Deltafile path (shorthand)")
 
 	flag.StringVar(&Version, "version", "", "Stemcell version in the form of [DIGITS].[DIGITS] (e.x. 123.01)")
 	flag.StringVar(&Version, "v", "", "Stemcell version (shorthand)")
@@ -70,21 +78,37 @@ func Usage() {
 	os.Exit(1)
 }
 
-func ValidateInputFlags(ova, ovf string) error {
-	Debugf("validating [ova] (%s) and [ovf] (%s) flags", ova, ovf)
-	ova = strings.TrimSpace(ova)
-	ovf = strings.TrimSpace(ovf)
-	switch {
-	case ova == "" && ovf == "":
-		return errors.New("must specify either the [ova] or [ovf] flag")
-	case ova != "" && ovf != "":
-		return errors.New("both [ova] and [ovf] flags provided - only one may be defined")
+func validFile(name string) error {
+	fi, err := os.Stat(name)
+	if err != nil {
+		return err
 	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", name)
+	}
+	return nil
+}
 
+func ValidateInputFlags(vhd, delta string) error {
+	Debugf("validating [vhd] (%s) and [delta] (%s) flags", vhd, delta)
+	switch {
+	case vhd == "" && delta == "":
+		return errors.New("must specify either the [vhd] or [delta] flag")
+	case vhd != "" && delta != "":
+		return errors.New("both [vhd] and [delta] flags provided - only one may be defined")
+	}
 	// check for extra flags
 	Debugf("validating that no extra flags or arguments were provided")
 	if n := len(flag.Args()); n != 0 {
 		return fmt.Errorf("extra arguments: %s\n", strings.Join(flag.Args(), ", "))
+	}
+
+	Debugf("validating that the [vhd] and [delta] exist and are regular files")
+	if err := validFile(vhd); err != nil {
+		return fmt.Errorf("invalid [vhd]: %s", err)
+	}
+	if err := validFile(delta); err != nil {
+		return fmt.Errorf("invalid [delta]: %s", err)
 	}
 	return nil
 }
@@ -169,38 +193,6 @@ func ValidateOVFNames(names []string) error {
 	return nil
 }
 
-func ValidateOVFDirectory(dirname string) error {
-	Debugf("validating ovf directory: %s", dirname)
-
-	fis, err := ioutil.ReadDir(dirname)
-	if err != nil {
-		return fmt.Errorf("ovf directory (%s): %s", dirname, err)
-	}
-	if len(fis) == 0 {
-		return fmt.Errorf("ovf directory (%s): is empty", dirname)
-	}
-
-	var names []string
-	for _, fi := range fis {
-		if fi.IsDir() {
-			return fmt.Errorf("ovf directory (%s): contains a sub-directoy %s",
-				dirname, fi.Name())
-		}
-		if !fi.Mode().IsRegular() {
-			return fmt.Errorf("ovf directory (%s): contains a file (%s) with invaid mode: %s",
-				dirname, fi.Name(), fi.Mode())
-		}
-		names = append(names, fi.Name())
-	}
-	Debugf("ovf directory (%s) contains the following files: %s",
-		dirname, strings.Join(names, ", "))
-
-	if err := ValidateOVFNames(names); err != nil {
-		return fmt.Errorf("ovf directory (%s): %s", dirname, err)
-	}
-	return nil
-}
-
 func ValidateOVAFile(name string) error {
 	Debugf("validating ova file: %s", name)
 	f, err := os.Open(name)
@@ -231,11 +223,79 @@ func ValidateOVAFile(name string) error {
 	return nil
 }
 
+func ExtractOVA(ova, dirname string) error {
+	Debugf("extracting ova file (%s) to directory: %s", ova, dirname)
+
+	tf, err := os.Open(ova)
+	if err != nil {
+		return err
+	}
+	defer tf.Close()
+
+	tr := tar.NewReader(tf)
+
+	limit := 100
+	for ; limit >= 0; limit-- {
+		h, err := tr.Next()
+		if err != nil {
+			if err != io.EOF {
+				return fmt.Errorf("tar: reading from archive (%s): %s", ova, err)
+			}
+			break
+		}
+
+		// expect a flat archive
+		name := h.Name
+		if filepath.Base(name) != name {
+			return fmt.Errorf("tar: archive contains subdirectory: %s", name)
+		}
+
+		// only allow regular files
+		mode := h.FileInfo().Mode()
+		if !mode.IsRegular() {
+			return fmt.Errorf("tar: unexpected file mode (%s): %s", name, mode)
+		}
+
+		path := filepath.Join(dirname, name)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+		if err != nil {
+			return fmt.Errorf("tar: opening file (%s): %s", path, err)
+		}
+		defer f.Close()
+
+		if _, err := io.Copy(f, tr); err != nil {
+			return fmt.Errorf("tar: writing file (%s): %s", path, err)
+		}
+	}
+	if limit <= 0 {
+		return errors.New("tar: too many files in archive")
+	}
+	return nil
+}
+
 func StemcellFilename(version string) string {
 	return fmt.Sprintf("bosh-stemcell-%s-vsphere-esxi-windows2012R2-go_agent.tgz", version)
 }
 
 var ErrInterupt = errors.New("interupt")
+
+type CancelWriteCloser struct {
+	wc   io.WriteCloser
+	stop chan struct{}
+}
+
+func (w *CancelWriteCloser) Write(p []byte) (int, error) {
+	select {
+	case <-w.stop:
+		return 0, ErrInterupt
+	default:
+		return w.wc.Write(p)
+	}
+}
+
+func (w *CancelWriteCloser) Close() error {
+	return w.wc.Close()
+}
 
 type CancelWriter struct {
 	w    io.Writer
@@ -395,6 +455,10 @@ func (c *Config) CreateStemcell() error {
 	return nil
 }
 
+// WARN WARN WARN
+//
+// ADD FILES TO TAR IN PROPER ORDER!!!!
+//
 func (c *Config) CreateImageFromOVF(dirname string) error {
 	Debugf("creating ova file from directory: %s", dirname)
 
@@ -535,8 +599,8 @@ cloud_properties:
 func ParseFlags() error {
 	flag.Parse()
 	Version = strings.TrimSpace(Version)
-	OvaFile = strings.TrimSpace(OvaFile)
-	OvaFile = strings.TrimSpace(OvaFile)
+	VHDFile = strings.TrimSpace(VHDFile)
+	DeltaFile = strings.TrimSpace(DeltaFile)
 	OutputDir = strings.TrimSpace(OutputDir)
 
 	if EnableDebug {
@@ -544,7 +608,7 @@ func ParseFlags() error {
 		Debugf("enabled")
 	}
 
-	if err := ValidateInputFlags(OvaFile, OvfDir); err != nil {
+	if err := ValidateInputFlags(VHDFile, DeltaFile); err != nil {
 		return err
 	}
 
@@ -560,9 +624,83 @@ func ParseFlags() error {
 	return nil
 }
 
+func ConvertVMX2OVA(vmx, ova string) error {
+	fmt.Println("converting vmx to ova")
+	cmd := exec.Command("ovftool", vmx, ova)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = os.Stdout
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("converting vmx to ova: %s\noutput:\n%s\n",
+			stderr.String())
+	}
+	return nil
+}
+
+func realMain(vhd, delta, version string, c *Config) error {
+	start := time.Now()
+
+	// PATCH HERE
+	tmpdir, err := c.TempDir()
+	if err != nil {
+		return err
+	}
+	patchedVMDK := filepath.Join(tmpdir, "image.vmdk")
+	if err := rdiff.Patch(vhd, delta, patchedVMDK, true); err != nil {
+		return err
+	}
+
+	vmxPath := filepath.Join(tmpdir, "image.vmx")
+	vmxFile, err := os.OpenFile(vmxPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	if err := VMXTemplate(patchedVMDK, vmxFile); err != nil {
+		return err
+	}
+	vmxFile.Close()
+
+	ovaPath := filepath.Join(tmpdir, "image.ova")
+	if err := ConvertVMX2OVA(vmxPath, ovaPath); err != nil {
+		return err
+	}
+
+	ovfDir := filepath.Join(tmpdir, "ovf")
+	os.Mkdir(ovfDir, 0755)
+	_ = OvfDir
+
+	if err := c.WriteManifest(); err != nil {
+		return err
+	}
+	if err := c.CreateStemcell(); err != nil {
+		return err
+	}
+
+	stemcellPath := filepath.Join(OutputDir, filepath.Base(c.Stemcell))
+	Debugf("moving stemcell (%s) to: %s", c.Stemcell, stemcellPath)
+
+	if err := os.Rename(c.Stemcell, stemcellPath); err != nil {
+		return err
+	}
+	Debugf("created stemcell (%s) in: %s", stemcellPath, time.Since(start))
+	fmt.Println("created stemell:", stemcellPath)
+
+	return nil
+}
+
 func main() {
+	tarfile := os.Args[1]
+	_ = tarfile
+}
+
+func xmain() {
 	if err := ParseFlags(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		Usage()
+	}
+
+	if _, err := exec.LookPath("ovftool"); err != nil {
+		fmt.Fprintf(os.Stderr, "could not locate 'ovftool' on PATH: %s", err)
 		Usage()
 	}
 
@@ -579,11 +717,12 @@ func main() {
 		Usage()
 	}
 
-	start := time.Now()
 	c := Config{stop: make(chan struct{})}
 
 	// cleanup if interupted
 	go func() {
+		// WARN Make sure we don't exit for things like
+		// TERM signals
 		ch := make(chan os.Signal, 64)
 		signal.Notify(ch)
 		stopping := false
@@ -598,44 +737,9 @@ func main() {
 		}
 	}()
 
-	// cleanup on error
-	exit := func(err error) {
-		fmt.Fprintln(os.Stderr, err)
+	if err := realMain(VHDFile, DeltaFile, Version, &c); err != nil {
 		c.Cleanup()
-		os.Exit(1)
+		// FOO
 	}
 
-	if OvfDir != "" {
-		if err := ValidateOVFDirectory(OvfDir); err != nil {
-			exit(err)
-		}
-		if err := c.CreateImageFromOVF(OvfDir); err != nil {
-			exit(err)
-		}
-	} else {
-		if err := ValidateOVAFile(OvaFile); err != nil {
-			exit(err)
-		}
-		if err := c.CreateImageFromOVA(OvaFile); err != nil {
-			exit(err)
-		}
-	}
-
-	if err := c.WriteManifest(); err != nil {
-		exit(err)
-	}
-	if err := c.CreateStemcell(); err != nil {
-		exit(err)
-	}
-
-	stemcellPath := filepath.Join(OutputDir, filepath.Base(c.Stemcell))
-	Debugf("moving stemcell (%s) to: %s", c.Stemcell, stemcellPath)
-
-	if err := os.Rename(c.Stemcell, stemcellPath); err != nil {
-		exit(err)
-	}
-
-	Debugf("created stemcell (%s) in: %s", stemcellPath, time.Since(start))
-
-	fmt.Println("created stemell:", stemcellPath)
 }
