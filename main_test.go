@@ -133,8 +133,49 @@ func TestExtractOVA_Invalid(t *testing.T) {
 		}
 		defer os.RemoveAll(tmpdir)
 
-		if err := ExtractOVA(x.archive, tmpdir); err == nil {
+		filename := filepath.Join("testdata", "tar", x.archive)
+		if err := ExtractOVA(filename, tmpdir); err == nil {
 			t.Errorf("ExtractOVA (%s): expected error because:", x.archive, x.reason)
+		}
+	}
+}
+
+func readFile(name string) (string, error) {
+	b, err := ioutil.ReadFile(name)
+	return string(b), err
+}
+
+var ovfXMLTests = []struct {
+	name string
+	err  error
+}{
+	{"full", nil},
+	{"short", nil},
+	{"no-ethernet-block", ErrElementNotFound},
+	{"multiple-ethernet-blocks", ErrMultipleElementsFound},
+}
+
+func TestRemoveItemBlock(t *testing.T) {
+	for _, x := range ovfXMLTests {
+		base := fmt.Sprintf("testdata/ovf/%s", x.name)
+		orig, err := readFile(base + ".orig.xml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		exp, err := readFile(base + ".exp.xml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := RemoveItemBlock(orig, "ethernet0")
+		if err != x.err {
+			t.Errorf("RemoveItemBlock (%s): want error: %v got: %v", x.name, x.err, err)
+			continue
+		}
+		if s != exp {
+			t.Fatalf("RemoveItemBlock (%s):\n"+
+				"--- WANT BEGIN ---\n%s\n---WANT END ---\n\n"+
+				"--- GOT BEGIN ---\n%s\n---GOT END ---\n",
+				x.name, exp, s)
 		}
 	}
 }

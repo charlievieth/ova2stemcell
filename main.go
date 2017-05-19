@@ -684,6 +684,62 @@ func ApplyPatch(vhd, delta, vmdk string) error {
 	return nil
 }
 
+var (
+	ErrElementNotFound       = errors.New("element not found")
+	ErrMultipleElementsFound = errors.New("multiple elements found")
+	ErrXMLMalformed          = errors.New("ovf xml malformed")
+)
+
+// RemoveItemBlock, removes XML Item block containing ElementName elem from ovf
+// XML s.
+func RemoveItemBlock(s, elem string) (string, error) {
+	i := strings.Index(s, elem)
+	if i == -1 {
+		return s, ErrElementNotFound
+	}
+	if strings.Count(s, elem) != 1 {
+		return s, ErrMultipleElementsFound
+	}
+
+	// find start of Item block
+	n := strings.LastIndex(s[:i], "<Item")
+	if n == -1 {
+		return s, nil
+	}
+	// check for malformed XML
+	if x := strings.IndexByte(s[n:], '>'); x == -1 {
+		return s, ErrXMLMalformed
+	}
+	if x := strings.LastIndex(s[:i], "</Item"); x > n {
+		return s, ErrXMLMalformed
+	}
+
+	// find end of Item block
+	o := strings.Index(s[i:], "</Item")
+	if o == -1 {
+		return s, ErrXMLMalformed
+	}
+	// check for malformed XML
+	if x := strings.IndexByte(s[o+i:], '>'); x == -1 {
+		return s, ErrXMLMalformed
+	}
+	if x := strings.Index(s[i:], "<Item"); x != -1 && x < o {
+		return s, ErrXMLMalformed
+	}
+	o += i + len("</Item")
+
+	// backtrack to just before previous newline
+	for ; n > 0 && s[n-1] != '\n'; n-- {
+	}
+
+	// advance to next newline
+	for ; o < len(s) && s[o] != '\n'; o++ {
+	}
+
+	old := s[n : o+1]
+	return strings.Replace(s, old, "", 1), nil
+}
+
 func ParseFlags() error {
 	flag.Parse()
 

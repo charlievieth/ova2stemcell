@@ -1,0 +1,19 @@
+<Item>
+  <rasd:AddressOnParent>0</rasd:AddressOnParent>
+  <rasd:ElementName>disk0</rasd:ElementName>
+  <rasd:HostResource>ovf:/disk/vmdisk1</rasd:HostResource>
+  <rasd:InstanceID>9</rasd:InstanceID>
+  <rasd:Parent>5</rasd:Parent>
+  <rasd:ResourceType>17</rasd:ResourceType>
+</Item>
+<Item>
+  <rasd:AddressOnParent>2</rasd:AddressOnParent>
+  <rasd:AutomaticAllocation>true</rasd:AutomaticAllocation>
+  <rasd:Connection>nat</rasd:Connection>
+  <rasd:Description>E1000e ethernet adapter on &quot;nat&quot;</rasd:Description>
+  <rasd:ElementName>ethernet0</rasd:ElementName>
+  <rasd:InstanceID>10</rasd:InstanceID>
+  <rasd:ResourceSubType>E1000e</rasd:ResourceSubType>
+  <rasd:ResourceType>10</rasd:ResourceType>
+  <vmw:Config ovf:required="false" vmw:key="wakeOnLanEnabled" vmw:value="false"/>
+</Item>
