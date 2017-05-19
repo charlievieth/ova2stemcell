@@ -15,11 +15,14 @@ var versionTests = []struct {
 	ok bool
 }{
 	{"1.2", true},
+	{"-1.2", false},
+	{"1.-2", false},
 	{"001.002", true},
 	{"0a1.002", false},
 	{"1.a", false},
 	{"a1.2", false},
 	{"a.2", false},
+	{"1.2 a", false},
 }
 
 func TestValidateVersion(t *testing.T) {
@@ -59,7 +62,7 @@ func TestExtractOVA_Valid(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpdir)
 
-	if err := ExtractOVA("testdata/valid.tar", tmpdir); err != nil {
+	if err := ExtractOVA("testdata/tar/valid.tar", tmpdir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,15 +113,15 @@ func TestExtractOVA_Invalid(t *testing.T) {
 		reason  string
 	}{
 		{
-			"testdata/has-sub-dir.tar",
+			"has-sub-dir.tar",
 			"subdirectories are not supported",
 		},
 		{
-			"testdata/too-many-files.tar",
+			"too-many-files.tar",
 			"too many files read from archive (this is capped at 100)",
 		},
 		{
-			"testdata/symlinks.tar",
+			"symlinks.tar",
 			"symlinks are not supported",
 		},
 	}

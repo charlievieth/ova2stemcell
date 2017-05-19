@@ -165,8 +165,9 @@ func validateVersion(s string) error {
 	if s == "" {
 		return errors.New("missing required argument 'version'")
 	}
-	if !regexp.MustCompile(`^\d{1,}.\d{1,}$`).MatchString(s) {
-		Debugf("expected version string to match regex: '%s'", `^\d*.*\d$`)
+	const pattern = `^\d{1,}.\d{1,}$`
+	if !regexp.MustCompile(pattern).MatchString(s) {
+		Debugf("expected version string to match regex: '%s'", pattern)
 		return fmt.Errorf("invalid version (%s) expected format [NUMBER].[NUMBER]", s)
 	}
 	return nil
