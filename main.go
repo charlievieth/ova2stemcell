@@ -19,35 +19,46 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charlievieth/ova2stemcell/ovftool"
 	"github.com/charlievieth/ova2stemcell/rdiff"
 )
 
 var (
 	Version     string
 	OutputDir   string
-	EnableDebug bool
 	OvaFile     string
 	OvfDir      string
 	VHDFile     string
 	DeltaFile   string
+	EnableDebug bool
+	DebugColor  bool
+	GzipPatch   bool
 )
 
 var Debugf = func(format string, a ...interface{}) {}
 
 const UsageMessage = `
-Usage %[1]s: [OPTIONS...] [-VERSION version] [-OVA FILENAME] [-OVF DIRNAME]
+Usage %[1]s: [OPTIONS...] [-VHD FILENAME] [-DELTA FILENAME] [-OUTPUT DIRNAME] [-VERSION version]
 
-Creates a BOSH stemcell from a OVA file or a directory containing an OVF
-package.
+Creates a BOSH stemcell from a VHD and DELTA (patch) file.
 
 Usage:
-  Either the [ova] or [ovf] flag must be specified, the [version] flag
-  is required.  If the [output] flag is not specified the stemcell fill
-  will be created in the current working directory.
+  The VMware 'ovftool' binary must be on your path or Fusion/Workstation
+  must be installed (both include the 'ovftool').
+
+  The [vhd], [delta] and [version] flags must be specified.  If the [output]
+  flag is not specified the stemcell will be created in the current working
+  directory.
 
 Examples:
-  %[1]s -v 1.2 -ova vm.ova
-  %[1]s -v 1.2 -ovf ~/dirname/ -o ~/stemcells/
+  %[1]s -vhd disk.vhd -delta patch.file -v 1.2
+
+    Will create a stemcell with version 1.2 in the current working directory.
+
+  %[1]s -vhd disk.vhd -delta patch.file -gzip -v 1.2 -output foo
+
+    Will create a stemcell with version 1.2 in the 'foo' directory using gzip
+    compressed patch file 'patch.file'.
 
 Flags:
 `
@@ -58,10 +69,10 @@ func init() {
 		flag.PrintDefaults()
 	}
 
-	flag.StringVar(&VHDFile, "vhd", "", "Path to initial VHD file to patch")
+	flag.StringVar(&VHDFile, "vhd", "", "VHD file to patch")
 
-	flag.StringVar(&DeltaFile, "delta", "", "Path to deltafile that will be applied to the VHD")
-	flag.StringVar(&DeltaFile, "d", "", "Deltafile path (shorthand)")
+	flag.StringVar(&DeltaFile, "delta", "", "Patch file that will be applied to the VHD")
+	flag.StringVar(&DeltaFile, "d", "", "Patch file (shorthand)")
 
 	flag.StringVar(&Version, "version", "", "Stemcell version in the form of [DIGITS].[DIGITS] (e.x. 123.01)")
 	flag.StringVar(&Version, "v", "", "Stemcell version (shorthand)")
@@ -70,7 +81,11 @@ func init() {
 		"Output directory, default is the current working directory.")
 	flag.StringVar(&OutputDir, "o", "", "Output directory (shorthand)")
 
+	flag.BoolVar(&GzipPatch, "gzip", false, "Patch file is gzip compressed")
+	flag.BoolVar(&GzipPatch, "x", false, "Gzip'd Patch file (shorthand)")
+
 	flag.BoolVar(&EnableDebug, "debug", false, "Print lots of debugging information")
+	flag.BoolVar(&DebugColor, "color", false, "Colorize debug output")
 }
 
 func Usage() {
@@ -89,64 +104,70 @@ func validFile(name string) error {
 	return nil
 }
 
-func ValidateInputFlags(vhd, delta string) error {
-	Debugf("validating [vhd] (%s) and [delta] (%s) flags", vhd, delta)
-	switch {
-	case vhd == "" && delta == "":
-		return errors.New("must specify either the [vhd] or [delta] flag")
-	case vhd != "" && delta != "":
-		return errors.New("both [vhd] and [delta] flags provided - only one may be defined")
+func ValidateFlags() []error {
+	Debugf("validating [vhd] (%s) and [delta] (%s) flags", VHDFile, DeltaFile)
+
+	var errs []error
+	add := func(err error) {
+		errs = append(errs, err)
 	}
+
 	// check for extra flags
 	Debugf("validating that no extra flags or arguments were provided")
 	if n := len(flag.Args()); n != 0 {
-		return fmt.Errorf("extra arguments: %s\n", strings.Join(flag.Args(), ", "))
+		add(fmt.Errorf("extra arguments: %s\n", strings.Join(flag.Args(), ", ")))
 	}
 
-	Debugf("validating that the [vhd] and [delta] exist and are regular files")
-	if err := validFile(vhd); err != nil {
-		return fmt.Errorf("invalid [vhd]: %s", err)
+	Debugf("validating VHD file [vhd]: %q", VHDFile)
+	if VHDFile == "" {
+		add(errors.New("missing required argument 'vhd'"))
 	}
-	if err := validFile(delta); err != nil {
-		return fmt.Errorf("invalid [delta]: %s", err)
+	if err := validFile(VHDFile); err != nil {
+		add(fmt.Errorf("invalid [vhd]: %s", err))
 	}
-	return nil
+
+	Debugf("validating patch file [delta]: %q", DeltaFile)
+	if DeltaFile == "" {
+		add(errors.New("missing required argument 'delta'"))
+	}
+	if err := validFile(DeltaFile); err != nil {
+		add(fmt.Errorf("invalid [delta]: %s", err))
+	}
+
+	Debugf("validating output directory: %s", OutputDir)
+	if OutputDir == "" {
+		add(errors.New("missing required argument 'output'"))
+	}
+	fi, err := os.Stat(OutputDir)
+	if err != nil {
+		add(fmt.Errorf("error opening output directory (%s): %s\n", OutputDir, err))
+	}
+	if !fi.IsDir() {
+		add(fmt.Errorf("output argument (%s): is not a directory\n", OutputDir))
+	}
+
+	Debugf("validating version string: %s", Version)
+	if err := validateVersion(Version); err != nil {
+		add(err)
+	}
+
+	name := filepath.Join(OutputDir, StemcellFilename(Version))
+	Debugf("validating that stemcell filename (%s) does not exist", name)
+	if _, err := os.Stat(name); !os.IsNotExist(err) {
+		add(fmt.Errorf("file (%s) already exists - refusing to overwrite", name))
+	}
+
+	return errs
 }
 
-// Validates that version s if of
-func ValidateVersion(version string) error {
-	Debugf("validating version string: %s", version)
-	s := strings.TrimSpace(version)
+func validateVersion(s string) error {
+	Debugf("validating version string: %s", s)
 	if s == "" {
 		return errors.New("missing required argument 'version'")
 	}
 	if !regexp.MustCompile(`^\d{1,}.\d{1,}$`).MatchString(s) {
 		Debugf("expected version string to match regex: '%s'", `^\d*.*\d$`)
 		return fmt.Errorf("invalid version (%s) expected format [NUMBER].[NUMBER]", s)
-	}
-	return nil
-}
-
-func ValidateOutputDir(dirname string) error {
-	Debugf("validating output directory: %s", dirname)
-	if dirname == "" {
-		return nil
-	}
-	fi, err := os.Stat(dirname)
-	if err != nil {
-		return fmt.Errorf("error opening output directory (%s): %s\n", dirname, err)
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("output argument (%s): is not a directory\n", dirname)
-	}
-	return nil
-}
-
-func ValidateStemcellFilename(dirname, version string) error {
-	name := filepath.Join(dirname, StemcellFilename(version))
-	Debugf("validating that stemcell filename (%s) does not exist", name)
-	if _, err := os.Stat(name); !os.IsNotExist(err) {
-		return fmt.Errorf("file (%s) already exists - refusing to overwrite", name)
 	}
 	return nil
 }
@@ -219,56 +240,6 @@ func ValidateOVAFile(name string) error {
 	}
 	if err := ValidateOVFNames(names); err != nil {
 		return fmt.Errorf("ova (%s): %s", name, err)
-	}
-	return nil
-}
-
-func ExtractOVA(ova, dirname string) error {
-	Debugf("extracting ova file (%s) to directory: %s", ova, dirname)
-
-	tf, err := os.Open(ova)
-	if err != nil {
-		return err
-	}
-	defer tf.Close()
-
-	tr := tar.NewReader(tf)
-
-	limit := 100
-	for ; limit >= 0; limit-- {
-		h, err := tr.Next()
-		if err != nil {
-			if err != io.EOF {
-				return fmt.Errorf("tar: reading from archive (%s): %s", ova, err)
-			}
-			break
-		}
-
-		// expect a flat archive
-		name := h.Name
-		if filepath.Base(name) != name {
-			return fmt.Errorf("tar: archive contains subdirectory: %s", name)
-		}
-
-		// only allow regular files
-		mode := h.FileInfo().Mode()
-		if !mode.IsRegular() {
-			return fmt.Errorf("tar: unexpected file mode (%s): %s", name, mode)
-		}
-
-		path := filepath.Join(dirname, name)
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-		if err != nil {
-			return fmt.Errorf("tar: opening file (%s): %s", path, err)
-		}
-		defer f.Close()
-
-		if _, err := io.Copy(f, tr); err != nil {
-			return fmt.Errorf("tar: writing file (%s): %s", path, err)
-		}
-	}
-	if limit <= 0 {
-		return errors.New("tar: too many files in archive")
 	}
 	return nil
 }
@@ -596,20 +567,132 @@ cloud_properties:
 	return nil
 }
 
-func ParseFlags() error {
-	flag.Parse()
-	Version = strings.TrimSpace(Version)
-	VHDFile = strings.TrimSpace(VHDFile)
-	DeltaFile = strings.TrimSpace(DeltaFile)
-	OutputDir = strings.TrimSpace(OutputDir)
+func ExtractOVA(ova, dirname string) error {
+	Debugf("extracting ova file (%s) to directory: %s", ova, dirname)
 
-	if EnableDebug {
-		Debugf = log.New(os.Stderr, "debug: ", 0).Printf
-		Debugf("enabled")
+	tf, err := os.Open(ova)
+	if err != nil {
+		return err
+	}
+	defer tf.Close()
+
+	tr := tar.NewReader(tf)
+
+	limit := 100
+	for ; limit >= 0; limit-- {
+		h, err := tr.Next()
+		if err != nil {
+			if err != io.EOF {
+				return fmt.Errorf("tar: reading from archive (%s): %s", ova, err)
+			}
+			break
+		}
+
+		// expect a flat archive
+		name := h.Name
+		if filepath.Base(name) != name {
+			return fmt.Errorf("tar: archive contains subdirectory: %s", name)
+		}
+
+		// only allow regular files
+		mode := h.FileInfo().Mode()
+		if !mode.IsRegular() {
+			return fmt.Errorf("tar: unexpected file mode (%s): %s", name, mode)
+		}
+
+		path := filepath.Join(dirname, name)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+		if err != nil {
+			return fmt.Errorf("tar: opening file (%s): %s", path, err)
+		}
+		defer f.Close()
+
+		if _, err := io.Copy(f, tr); err != nil {
+			return fmt.Errorf("tar: writing file (%s): %s", path, err)
+		}
+	}
+	if limit <= 0 {
+		return errors.New("tar: too many files in archive")
+	}
+	return nil
+}
+
+func ConvertVMX2OVA(vmx, ova string) error {
+	const errFmt = "converting vmx to ova: %s\n" +
+		"-- BEGIN STDERR OUTPUT -- :\n%s\n-- END STDERR OUTPUT --\n"
+
+	// ignore stdout
+	var stderr bytes.Buffer
+
+	cmd := exec.Command("ovftool", vmx, ova)
+	cmd.Stderr = &stderr
+
+	Debugf("converting vmx to ova with cmd: %s %s", cmd.Path, cmd.Args)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf(errFmt, err, stderr.String())
 	}
 
-	if err := ValidateInputFlags(VHDFile, DeltaFile); err != nil {
-		return err
+	return nil
+}
+
+func ApplyPatch(vhd, delta, vmdk string) error {
+	Debugf("preparing to apply patch: vhd: %s delta: %s vmdk: %s", vhd, delta, vmdk)
+
+	// vhd file
+	fv, err := os.Open(vhd)
+	if err != nil {
+		return fmt.Errorf("opening [vhd] file: %s", err)
+	}
+	defer fv.Close()
+
+	// delta file
+	fd, err := os.Open(delta)
+	if err != nil {
+		return fmt.Errorf("opening [delta] file: %s", err)
+	}
+	defer fd.Close()
+
+	// optionally wrap with gzip reader
+	var wd io.Reader
+	if GzipPatch {
+		Debugf("treating delta file (%s) as gzip compressed", delta)
+		w, err := gzip.NewReader(fd)
+		if err != nil {
+			return fmt.Errorf("wrapping [delta] in gzip reader: %s", err)
+		}
+		wd = w
+	} else {
+		wd = fd
+	}
+
+	// vmdk file
+	fk, err := os.OpenFile(vmdk, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("creating [vmdk] file: %s", err)
+	}
+	defer fk.Close()
+
+	start := time.Now() // this is sometimes interesting
+
+	Debugf("applying patch with rdiff")
+	if err := Patch(fv, wd, fk); err != nil {
+		return fmt.Errorf("patching file: %s", err)
+	}
+
+	Debugf("applied patch in: %s", time.Since(start))
+	return nil
+}
+
+func ParseFlags() error {
+	flag.Parse()
+
+	if EnableDebug {
+		if DebugColor {
+			Debugf = log.New(os.Stderr, "\033[32m"+"debug: "+"\033[0m", 0).Printf
+		} else {
+			Debugf = log.New(os.Stderr, "debug: ", 0).Printf
+		}
+		Debugf("enabled")
 	}
 
 	if OutputDir == "" || OutputDir == "." {
@@ -617,23 +700,10 @@ func ParseFlags() error {
 		if err != nil {
 			return fmt.Errorf("getting working directory: %s", err)
 		}
-		Debugf("set output dir (%s) to working directory: %s", OutputDir, wd)
+		Debugf("setting output dir (%s) to working directory: %s", OutputDir, wd)
 		OutputDir = wd
 	}
 
-	return nil
-}
-
-func ConvertVMX2OVA(vmx, ova string) error {
-	fmt.Println("converting vmx to ova")
-	cmd := exec.Command("ovftool", vmx, ova)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	cmd.Stdout = os.Stdout
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("converting vmx to ova: %s\noutput:\n%s\n",
-			stderr.String())
-	}
 	return nil
 }
 
@@ -689,31 +759,24 @@ func realMain(vhd, delta, version string, c *Config) error {
 }
 
 func main() {
-	tarfile := os.Args[1]
-	_ = tarfile
-}
-
-func xmain() {
+	Debugf("parsing flags")
 	if err := ParseFlags(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		Usage()
 	}
 
-	if _, err := exec.LookPath("ovftool"); err != nil {
+	path, err := ovftool.Ovftool()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not locate 'ovftool' on PATH: %s", err)
-		Usage()
+		// Usage()
 	}
+	Debugf("using 'ovftool' found at: %s", path)
 
-	if err := ValidateVersion(Version); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		Usage()
-	}
-	if err := ValidateOutputDir(OutputDir); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		Usage()
-	}
-	if err := ValidateStemcellFilename(OutputDir, Version); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if errs := ValidateFlags(); errs != nil {
+		fmt.Fprintln(os.Stderr, "Error: invalid arguments")
+		for _, e := range errs {
+			fmt.Fprintf(os.Stderr, "  %s\n", e)
+		}
 		Usage()
 	}
 

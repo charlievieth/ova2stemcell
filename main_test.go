@@ -24,7 +24,7 @@ var versionTests = []struct {
 
 func TestValidateVersion(t *testing.T) {
 	for _, x := range versionTests {
-		err := ValidateVersion(x.s)
+		err := validateVersion(x.s)
 		if (err == nil) != x.ok {
 			if x.ok {
 				t.Errorf("failed to validate version: %s\n", x.s)
@@ -32,24 +32,6 @@ func TestValidateVersion(t *testing.T) {
 				t.Errorf("expected error for version (%s) but got: %v\n", x.s, err)
 			}
 		}
-	}
-}
-
-func TestValidateOutputDir(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ValidateOutputDir(wd); err != nil {
-		t.Error(err)
-	}
-	misingDir := filepath.Join("abcd,", wd, "foo", "bar")
-	if err := ValidateOutputDir(misingDir); err == nil {
-		t.Error(err)
-	}
-	filename := filepath.Join(wd, "main.go")
-	if err := ValidateOutputDir(filename); err == nil {
-		t.Error(err)
 	}
 }
 
