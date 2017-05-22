@@ -1,0 +1,9 @@
+data/sbuffer/sbuffer.go.i
+data/rsync.go.i
+data/rsync/gen_test.go.i
+data/rdiff/main.go.i
+data/proto/proto.go.i
+data/gen_test.go.i
+data/rsync/rsync.go.i
+data/LICENSE.i
+data/main.go.i

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -42,54 +41,61 @@ func parseVMX(vmx string) (map[string]string, error) {
 	return m, nil
 }
 
-func TestVMXTemplate(t *testing.T) {
-	const filename = "FooBarBaz.vmdk"
+func checkVMXTemplate(t *testing.T, vmdkPath, vmxContent string) {
 	const keyname = "scsi0:0.fileName"
 
-	var buf bytes.Buffer
-	if err := VMXTemplate(filename, &buf); err != nil {
-		t.Fatal(err)
-	}
-
-	m, err := parseVMX(buf.String())
+	m, err := parseVMX(vmxContent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := m[keyname]; s != filename {
-		t.Errorf("VMXTemplate: key: %q want: %q got: %q", keyname, filename, s)
+	if s := m[keyname]; s != vmdkPath {
+		t.Errorf("VMXTemplate: key: %q want: %q got: %q", keyname, vmdkPath, s)
 	}
+}
+
+func TestVMXTemplate(t *testing.T) {
+	const vmdkPath = "FooBarBaz.vmdk"
+
+	var buf bytes.Buffer
+	if err := VMXTemplate(vmdkPath, &buf); err != nil {
+		t.Fatal(err)
+	}
+	checkVMXTemplate(t, vmdkPath, buf.String())
 
 	if err := VMXTemplate("", &buf); err == nil {
 		t.Error("VMXTemplate: expected error for empty vmx filename")
 	}
 }
 
-func extractGzipArchive(name string, t *testing.T) string {
-	t.Logf("extractGzipArchive: extracting tgz: %s", name)
+func TestWriteVMXTemplate(t *testing.T) {
+	const vmdkPath = "FooBarBaz.vmdk"
 
 	tmpdir, err := ioutil.TempDir("", "test-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("extractGzipArchive: using temp directory: %s", tmpdir)
+	vmxPath := filepath.Join(tmpdir, "FooBarBaz.vmx")
 
-	f, err := os.Open(name)
+	if err := WriteVMXTemplate(vmdkPath, vmxPath); err != nil {
+		t.Fatal(err)
+	}
+	b, err := ioutil.ReadFile(vmxPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	checkVMXTemplate(t, vmdkPath, string(b))
 
-	w, err := gzip.NewReader(f)
-	if err != nil {
+	if err := os.Remove(vmxPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := ExtractArchive(w, tmpdir); err != nil {
-		t.Fatal(err)
+
+	// vmx file is deleted if there is an error
+	if err := WriteVMXTemplate("", vmxPath); err == nil {
+		t.Error("WriteVMXTemplate: expected error for empty vmx filename")
 	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(vmxPath); err == nil {
+		t.Error("WriteVMXTemplate: failed to delete vmx file on error: %s", vmxPath)
 	}
-	return tmpdir
 }
 
 func TestVMXTemplateToOVF(t *testing.T) {
@@ -115,7 +121,7 @@ VMX File (%[2]s):
 	}
 	t.Logf("TestVMXTemplateToOVF: ovftool location: %s", toolpath)
 
-	dirname := extractGzipArchive("testdata/patch-test.tar.gz", t)
+	dirname := extractGzipArchive(t, "testdata/patch-test.tar.gz")
 	defer os.RemoveAll(dirname)
 
 	vmdk := filepath.Join(dirname, "expected.vmdk")

@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/charlievieth/ova2stemcell/ovftool"
-	"github.com/charlievieth/ova2stemcell/rdiff"
 )
 
 var (
@@ -32,7 +31,6 @@ var (
 	DeltaFile   string
 	EnableDebug bool
 	DebugColor  bool
-	GzipPatch   bool
 )
 
 var Debugf = func(format string, a ...interface{}) {}
@@ -80,9 +78,6 @@ func init() {
 	flag.StringVar(&OutputDir, "output", "",
 		"Output directory, default is the current working directory.")
 	flag.StringVar(&OutputDir, "o", "", "Output directory (shorthand)")
-
-	flag.BoolVar(&GzipPatch, "gzip", false, "Patch file is gzip compressed")
-	flag.BoolVar(&GzipPatch, "x", false, "Gzip'd Patch file (shorthand)")
 
 	flag.BoolVar(&EnableDebug, "debug", false, "Print lots of debugging information")
 	flag.BoolVar(&DebugColor, "color", false, "Colorize debug output")
@@ -251,22 +246,27 @@ func StemcellFilename(version string) string {
 
 var ErrInterupt = errors.New("interupt")
 
-type CancelWriteCloser struct {
-	wc   io.WriteCloser
+type CancelReadSeeker struct {
+	rs   io.ReadSeeker
 	stop chan struct{}
 }
 
-func (w *CancelWriteCloser) Write(p []byte) (int, error) {
+func (r *CancelReadSeeker) Seek(offset int64, whence int) (int64, error) {
 	select {
-	case <-w.stop:
+	case <-r.stop:
 		return 0, ErrInterupt
 	default:
-		return w.wc.Write(p)
+		return r.rs.Seek(offset, whence)
 	}
 }
 
-func (w *CancelWriteCloser) Close() error {
-	return w.wc.Close()
+func (r *CancelReadSeeker) Read(p []byte) (int, error) {
+	select {
+	case <-r.stop:
+		return 0, ErrInterupt
+	default:
+		return r.rs.Read(p)
+	}
 }
 
 type CancelWriter struct {
@@ -427,109 +427,6 @@ func (c *Config) CreateStemcell() error {
 	return nil
 }
 
-// WARN WARN WARN
-//
-// ADD FILES TO TAR IN PROPER ORDER!!!!
-//
-func (c *Config) CreateImageFromOVF(dirname string) error {
-	Debugf("creating ova file from directory: %s", dirname)
-
-	fis, err := ioutil.ReadDir(dirname)
-	if err != nil {
-		return fmt.Errorf("ovf directory (%s): %s", dirname, err)
-	}
-
-	tmpdir, err := c.TempDir()
-	if err != nil {
-		return err
-	}
-
-	c.Image = filepath.Join(tmpdir, "image")
-	image, err := os.OpenFile(c.Image, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("creating image file (%s): %s", c.Image, err)
-	}
-	defer image.Close()
-
-	errorf := func(format string, a ...interface{}) error {
-		image.Close()
-		os.Remove(c.Image)
-		return fmt.Errorf(format, a...)
-	}
-
-	Debugf("created temp image file: %s", c.Image)
-
-	// Wrap file f with c.Writer so that writes can be cancelled
-	w := gzip.NewWriter(c.Writer(image))
-	t := time.Now()
-	h := sha1.New()
-	tr := tar.NewWriter(io.MultiWriter(h, w))
-
-	for _, fi := range fis {
-		path := filepath.Join(dirname, fi.Name())
-		if err := c.AddTarFile(tr, path); err != nil {
-			return errorf("adding file (%s) to image (%s) archive: %s",
-				dirname, path, err)
-		}
-	}
-
-	if err := tr.Close(); err != nil {
-		return errorf("creating ova from directory (%s): %s", dirname, err)
-	}
-	if err := w.Close(); err != nil {
-		return errorf("creating ova from directory (%s): %s", dirname, err)
-	}
-	Debugf("created image file in: %s", time.Since(t))
-
-	c.Sha1sum = fmt.Sprintf("%x", h.Sum(nil))
-	Debugf("sha1 checksum of image file is: %s", c.Sha1sum)
-
-	return nil
-}
-
-func (c *Config) CreateImageFromOVA(name string) error {
-	Debugf("creating image fime from ova: %s", name)
-
-	ova, err := os.Open(name)
-	if err != nil {
-		return fmt.Errorf("opening ova file (%s): %s", name, err)
-	}
-	defer ova.Close()
-
-	tmpdir, err := c.TempDir()
-	if err != nil {
-		return err
-	}
-
-	c.Image = filepath.Join(tmpdir, "image")
-	image, err := os.OpenFile(c.Image, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("creating image file (%s): %s", c.Image, err)
-	}
-	defer image.Close()
-	Debugf("created temp image file: %s", c.Image)
-
-	Debugf("compressing ova (%s) with gzip to image file: %s", name, c.Image)
-
-	h := sha1.New()
-	t := time.Now()
-	w := gzip.NewWriter(c.Writer(io.MultiWriter(h, image)))
-	if _, err := io.Copy(w, ova); err != nil {
-		os.Remove(c.Image)
-		return fmt.Errorf("writing image (%s): %s", c.Image, err)
-	}
-	if err := w.Close(); err != nil {
-		os.Remove(c.Image)
-		return fmt.Errorf("writing image (%s): %s", c.Image, err)
-	}
-	Debugf("created image file in: %s", time.Since(t))
-
-	c.Sha1sum = fmt.Sprintf("%x", h.Sum(nil))
-	Debugf("sha1 checksum of image file is: %s", c.Sha1sum)
-
-	return nil
-}
-
 func (c *Config) WriteManifest() error {
 	const format = `---
 name: bosh-vsphere-esxi-windows-2012R2-go_agent
@@ -622,7 +519,7 @@ func ExtractArchive(archive io.Reader, dirname string) error {
 	return nil
 }
 
-func ConvertVMX2OVA(vmx, ova string) error {
+func (c *Config) ConvertVMX2OVA(vmx, ova string) error {
 	const errFmt = "converting vmx to ova: %s\n" +
 		"-- BEGIN STDERR OUTPUT -- :\n%s\n-- END STDERR OUTPUT --\n"
 
@@ -631,16 +528,34 @@ func ConvertVMX2OVA(vmx, ova string) error {
 
 	cmd := exec.Command("ovftool", vmx, ova)
 	cmd.Stderr = &stderr
-
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("ovftool: %s", err)
+	}
 	Debugf("converting vmx to ova with cmd: %s %s", cmd.Path, cmd.Args)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf(errFmt, err, stderr.String())
+
+	// Wait for process exit or interupt
+	errCh := make(chan error, 1)
+	go func() { errCh <- cmd.Wait() }()
+
+	select {
+	case <-c.stop:
+		if cmd.Process != nil {
+			Debugf("recieved stop signall killing ovftool process")
+			cmd.Process.Kill()
+		}
+		return ErrInterupt
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf(errFmt, err, stderr.String())
+		}
 	}
 
 	return nil
 }
 
-func ApplyPatch(vhd, delta, vmdk string) error {
+// ApplyPatch, applies patch file delta to base file vhd, to create file vmdk.
+// It is an error if the vmdk file already exists.
+func (c *Config) ApplyPatch(vhd, delta, vmdk string) error {
 	Debugf("preparing to apply patch: vhd: %s delta: %s vmdk: %s", vhd, delta, vmdk)
 
 	// vhd file
@@ -649,6 +564,7 @@ func ApplyPatch(vhd, delta, vmdk string) error {
 		return fmt.Errorf("opening [vhd] file: %s", err)
 	}
 	defer fv.Close()
+	rsv := &CancelReadSeeker{stop: c.stop, rs: fv}
 
 	// delta file
 	fd, err := os.Open(delta)
@@ -656,19 +572,7 @@ func ApplyPatch(vhd, delta, vmdk string) error {
 		return fmt.Errorf("opening [delta] file: %s", err)
 	}
 	defer fd.Close()
-
-	// optionally wrap with gzip reader
-	var wd io.Reader
-	if GzipPatch {
-		Debugf("treating delta file (%s) as gzip compressed", delta)
-		w, err := gzip.NewReader(fd)
-		if err != nil {
-			return fmt.Errorf("wrapping [delta] in gzip reader: %s", err)
-		}
-		wd = w
-	} else {
-		wd = fd
-	}
+	rd := &CancelReader{stop: c.stop, r: fd}
 
 	// vmdk file
 	fk, err := os.OpenFile(vmdk, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
@@ -676,16 +580,188 @@ func ApplyPatch(vhd, delta, vmdk string) error {
 		return fmt.Errorf("creating [vmdk] file: %s", err)
 	}
 	defer fk.Close()
+	wk := &CancelWriter{stop: c.stop, w: fk}
 
 	start := time.Now() // this is sometimes interesting
 
 	Debugf("applying patch with rdiff")
-	if err := Patch(fv, wd, fk); err != nil {
-		return fmt.Errorf("patching file: %s", err)
+	if err := Patch(rsv, rd, wk); err != nil {
+		return err
 	}
 
 	Debugf("applied patch in: %s", time.Since(start))
 	return nil
+}
+
+func ParseFlags() error {
+	flag.Parse()
+
+	if EnableDebug {
+		if DebugColor {
+			Debugf = log.New(os.Stderr, "\033[32m"+"debug: "+"\033[0m", 0).Printf
+		} else {
+			Debugf = log.New(os.Stderr, "debug: ", 0).Printf
+		}
+		Debugf("enabled")
+	}
+
+	if OutputDir == "" || OutputDir == "." {
+		wd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("getting working directory: %s", err)
+		}
+		Debugf("setting output dir (%s) to working directory: %s", OutputDir, wd)
+		OutputDir = wd
+	}
+
+	return nil
+}
+
+// CreateImage, converts a vmdk to a gzip compressed image file and records the
+// sha1 sum of the resulting image.
+func (c *Config) CreateImage(vmdk string) error {
+	Debugf("Creating [image] from [vmdk]: %s", vmdk)
+
+	tmpdir, err := c.TempDir()
+	if err != nil {
+		return err
+	}
+
+	vmxPath := filepath.Join(tmpdir, "image.vmx")
+	if err := WriteVMXTemplate(vmdk, vmxPath); err != nil {
+		return err
+	}
+
+	ovaPath := filepath.Join(tmpdir, "image.ova")
+	if err := c.ConvertVMX2OVA(vmxPath, ovaPath); err != nil {
+		return err
+	}
+
+	// reader
+	r, err := os.Open(ovaPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	// image file (writer)
+	c.Image = filepath.Join(tmpdir, "image")
+	f, err := os.OpenFile(c.Image, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// calculate sha1 while writing image file
+	h := sha1.New()
+	w := gzip.NewWriter(io.MultiWriter(f, h))
+
+	if _, err := io.Copy(w, r); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+
+	c.Sha1sum = fmt.Sprintf("%x", h.Sum(nil))
+	Debugf("Sha1 of image (%s): %s", c.Image, c.Sha1sum)
+	return nil
+}
+
+func realMain(c *Config, vhd, delta, version string) error {
+	start := time.Now()
+
+	// PATCH HERE
+	tmpdir, err := c.TempDir()
+	if err != nil {
+		return err
+	}
+
+	patchedVMDK := filepath.Join(tmpdir, "image.vmdk")
+	if err := c.ApplyPatch(vhd, delta, patchedVMDK); err != nil {
+		return err
+	}
+
+	vmxPath := filepath.Join(tmpdir, "image.vmx")
+	if err := WriteVMXTemplate(patchedVMDK, vmxPath); err != nil {
+		return err
+	}
+
+	ovaPath := filepath.Join(tmpdir, "image.ova")
+	if err := c.ConvertVMX2OVA(vmxPath, ovaPath); err != nil {
+		return err
+	}
+
+	ovfDir := filepath.Join(tmpdir, "ovf")
+	os.Mkdir(ovfDir, 0755)
+	_ = OvfDir
+
+	if err := c.WriteManifest(); err != nil {
+		return err
+	}
+	if err := c.CreateStemcell(); err != nil {
+		return err
+	}
+
+	stemcellPath := filepath.Join(OutputDir, filepath.Base(c.Stemcell))
+	Debugf("moving stemcell (%s) to: %s", c.Stemcell, stemcellPath)
+
+	if err := os.Rename(c.Stemcell, stemcellPath); err != nil {
+		return err
+	}
+	Debugf("created stemcell (%s) in: %s", stemcellPath, time.Since(start))
+	fmt.Println("created stemell:", stemcellPath)
+
+	return nil
+}
+
+func main() {
+	Debugf("parsing flags")
+	if err := ParseFlags(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		Usage()
+	}
+
+	path, err := ovftool.Ovftool()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not locate 'ovftool' on PATH: %s", err)
+		Usage()
+	}
+	Debugf("using 'ovftool' found at: %s", path)
+
+	if errs := ValidateFlags(); errs != nil {
+		fmt.Fprintln(os.Stderr, "Error: invalid arguments")
+		for _, e := range errs {
+			fmt.Fprintf(os.Stderr, "  %s\n", e)
+		}
+		Usage()
+	}
+
+	c := Config{stop: make(chan struct{})}
+
+	// cleanup if interupted
+	go func() {
+		// WARN Make sure we don't exit for things like
+		// TERMINAL signals
+		ch := make(chan os.Signal, 64)
+		signal.Notify(ch)
+		stopping := false
+		for sig := range ch {
+			if stopping {
+				fmt.Fprintf(os.Stderr, "recieved second (%s) signale - exiting now\n", sig)
+				os.Exit(1)
+			}
+			stopping = true
+			fmt.Fprintf(os.Stderr, "recieved (%s) signal cleaning up\n", sig)
+			c.Stop()
+		}
+	}()
+
+	if err := realMain(&c, VHDFile, DeltaFile, Version); err != nil {
+		c.Cleanup()
+		// FOO
+	}
+
 }
 
 var (
@@ -742,128 +818,4 @@ func RemoveItemBlock(s, elem string) (string, error) {
 
 	old := s[n : o+1]
 	return strings.Replace(s, old, "", 1), nil
-}
-
-func ParseFlags() error {
-	flag.Parse()
-
-	if EnableDebug {
-		if DebugColor {
-			Debugf = log.New(os.Stderr, "\033[32m"+"debug: "+"\033[0m", 0).Printf
-		} else {
-			Debugf = log.New(os.Stderr, "debug: ", 0).Printf
-		}
-		Debugf("enabled")
-	}
-
-	if OutputDir == "" || OutputDir == "." {
-		wd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("getting working directory: %s", err)
-		}
-		Debugf("setting output dir (%s) to working directory: %s", OutputDir, wd)
-		OutputDir = wd
-	}
-
-	return nil
-}
-
-func realMain(vhd, delta, version string, c *Config) error {
-	start := time.Now()
-
-	// PATCH HERE
-	tmpdir, err := c.TempDir()
-	if err != nil {
-		return err
-	}
-	patchedVMDK := filepath.Join(tmpdir, "image.vmdk")
-	if err := rdiff.Patch(vhd, delta, patchedVMDK, true); err != nil {
-		return err
-	}
-
-	vmxPath := filepath.Join(tmpdir, "image.vmx")
-	vmxFile, err := os.OpenFile(vmxPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	if err := VMXTemplate(patchedVMDK, vmxFile); err != nil {
-		return err
-	}
-	vmxFile.Close()
-
-	ovaPath := filepath.Join(tmpdir, "image.ova")
-	if err := ConvertVMX2OVA(vmxPath, ovaPath); err != nil {
-		return err
-	}
-
-	ovfDir := filepath.Join(tmpdir, "ovf")
-	os.Mkdir(ovfDir, 0755)
-	_ = OvfDir
-
-	if err := c.WriteManifest(); err != nil {
-		return err
-	}
-	if err := c.CreateStemcell(); err != nil {
-		return err
-	}
-
-	stemcellPath := filepath.Join(OutputDir, filepath.Base(c.Stemcell))
-	Debugf("moving stemcell (%s) to: %s", c.Stemcell, stemcellPath)
-
-	if err := os.Rename(c.Stemcell, stemcellPath); err != nil {
-		return err
-	}
-	Debugf("created stemcell (%s) in: %s", stemcellPath, time.Since(start))
-	fmt.Println("created stemell:", stemcellPath)
-
-	return nil
-}
-
-func main() {
-	Debugf("parsing flags")
-	if err := ParseFlags(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		Usage()
-	}
-
-	path, err := ovftool.Ovftool()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "could not locate 'ovftool' on PATH: %s", err)
-		// Usage()
-	}
-	Debugf("using 'ovftool' found at: %s", path)
-
-	if errs := ValidateFlags(); errs != nil {
-		fmt.Fprintln(os.Stderr, "Error: invalid arguments")
-		for _, e := range errs {
-			fmt.Fprintf(os.Stderr, "  %s\n", e)
-		}
-		Usage()
-	}
-
-	c := Config{stop: make(chan struct{})}
-
-	// cleanup if interupted
-	go func() {
-		// WARN Make sure we don't exit for things like
-		// TERM signals
-		ch := make(chan os.Signal, 64)
-		signal.Notify(ch)
-		stopping := false
-		for sig := range ch {
-			if stopping {
-				fmt.Fprintf(os.Stderr, "recieved second (%s) signale - exiting now\n", sig)
-				os.Exit(1)
-			}
-			stopping = true
-			fmt.Fprintf(os.Stderr, "recieved (%s) signal cleaning up\n", sig)
-			c.Stop()
-		}
-	}()
-
-	if err := realMain(VHDFile, DeltaFile, Version, &c); err != nil {
-		c.Cleanup()
-		// FOO
-	}
-
 }

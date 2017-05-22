@@ -186,6 +186,68 @@ func delta(signature, newfile, delta string, checkFile bool, comp proto.Comp) er
 	return nil
 }
 
+func patch(basis, delta, newfile string, checkFile bool) error {
+	rs := getRsync()
+	basisFile, err := os.Open(basis)
+	if err != nil {
+		return err
+	}
+	defer basisFile.Close()
+
+	deltaFile, err := os.Open(delta)
+	if err != nil {
+		return err
+	}
+	defer deltaFile.Close()
+
+	fsFile, err := os.Create(newfile)
+	if err != nil {
+		return err
+	}
+	defer fsFile.Close()
+
+	deltaDecode := proto.Reader{Reader: deltaFile}
+	rs.BlockSize, err = deltaDecode.Header(proto.TypeDelta)
+	if err != nil {
+		if err == io.EOF {
+			return io.ErrUnexpectedEOF
+		}
+		return err
+	}
+	defer deltaDecode.Close()
+
+	hashOps := make(chan rsync.Operation, 2)
+	ops := make(chan rsync.Operation)
+	// Load operations from file.
+	var decodeError error
+	go func() {
+		defer close(ops)
+		decodeError = deltaDecode.ReadOperations(ops, hashOps)
+	}()
+
+	var hasher hash.Hash
+	if checkFile {
+		hasher = md5.New()
+	}
+	err = rs.ApplyDelta(fsFile, basisFile, ops, hasher)
+	if err != nil {
+		return err
+	}
+	if decodeError != nil {
+		return decodeError
+	}
+	if checkFile == false {
+		return nil
+	}
+	hashOp := <-hashOps
+	if hashOp.Data == nil {
+		return NoTargetSumError
+	}
+	if bytes.Equal(hashOp.Data, hasher.Sum(nil)) == false {
+		return HashNoMatchError
+	}
+
+	return nil
 }
 
 func test(basis1, basis2 string) error {

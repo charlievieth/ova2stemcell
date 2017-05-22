@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"os"
 	"text/template"
 )
 
@@ -77,17 +78,31 @@ vmci0.pciSlotNumber = "35"
 vmci0.present = "TRUE"
 `
 
-func VMXTemplate(vmdk string, w io.Writer) error {
-	if vmdk == "" {
+func VMXTemplate(vmdkPath string, w io.Writer) error {
+	if vmdkPath == "" {
 		return errors.New("vmx template: empty vmdk filename")
 	}
 	type context struct {
 		VMDKFile string
 	}
-	ctxt := context{VMDKFile: vmdk}
+	ctxt := context{VMDKFile: vmdkPath}
 	t, err := template.New("vmx template").Parse(vmxTemplate)
 	if err != nil {
 		return err
 	}
 	return t.Execute(w, ctxt)
+}
+
+// WriteVMXTemplate writes the VMX template for VMDK vmdk to file filename.
+func WriteVMXTemplate(vmdkPath, vmxPath string) error {
+	f, err := os.OpenFile(vmxPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	err = VMXTemplate(vmdkPath, f)
+	f.Close()
+	if err != nil {
+		os.Remove(vmxPath)
+	}
+	return err
 }

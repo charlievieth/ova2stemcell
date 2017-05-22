@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"crypto/sha1"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -140,6 +144,117 @@ func TestExtractOVA_Invalid(t *testing.T) {
 	}
 }
 
+func TestApplyPatch(t *testing.T) {
+	const archive = "testdata/patch-test.tar.gz"
+
+	dirname := extractGzipArchive(t, archive)
+	defer os.RemoveAll(dirname)
+
+	vhd := filepath.Join(dirname, "original.vhd")
+	delta := filepath.Join(dirname, "delta.patch")
+	expVMDK := filepath.Join(dirname, "expected.vmdk")
+
+	// output file
+	newVMDK := filepath.Join(dirname, "image.vmdk")
+
+	conf := Config{stop: make(chan struct{})}
+
+	// Normal operation
+	{
+		if err := conf.ApplyPatch(vhd, delta, newVMDK); err != nil {
+			t.Fatal(err)
+		}
+		expSrc, err := ioutil.ReadFile(expVMDK)
+		if err != nil {
+			t.Fatalf("ApplyPatch: reading expected vmdk file (%s): %s", expVMDK, err)
+		}
+		vmdkSrc, err := ioutil.ReadFile(newVMDK)
+		if err != nil {
+			t.Fatalf("ApplyPatch: reading vmdk file (%s): %s", newVMDK, err)
+		}
+		if !bytes.Equal(expSrc, vmdkSrc) {
+			t.Fatalf("ApplyPatch: patched vmdk (%s) does not match expected vmdk (%s)",
+				newVMDK, expVMDK)
+		}
+	}
+
+	// Error when VMDK file already exists
+	{
+		if err := conf.ApplyPatch(vhd, delta, newVMDK); err == nil {
+			t.Error("ApplyPatch: expected an error when the VMDK already exists got")
+		}
+	}
+
+	// Cancel: test that all readers and writers are wrapped with Cancel* types.
+	{
+		if err := os.Remove(newVMDK); err != nil {
+			t.Fatal(err)
+		}
+
+		tmpdir, err := conf.TempDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- conf.ApplyPatch(vhd, delta, newVMDK) }()
+		conf.Stop() // trigger cancelation of reads/writes
+
+		if err := <-errCh; err != ErrInterupt {
+			t.Errorf("ApplyPatch: Config Stopped: expected error: %v got: %v",
+				ErrInterupt, err)
+		}
+
+		if _, err := os.Stat(tmpdir); !os.IsNotExist(err) {
+			t.Errorf("ApplyPatch: Config did not delete it's temp dir (%s) after "+
+				"being stopped:", tmpdir)
+		}
+	}
+}
+
+func TestCreateImage(t *testing.T) {
+	const archive = "testdata/patch-test.tar.gz"
+
+	dirname := extractGzipArchive(t, archive)
+	defer os.RemoveAll(dirname)
+
+	vmdkPath := filepath.Join(dirname, "expected.vmdk")
+
+	conf := Config{stop: make(chan struct{})}
+
+	if err := conf.CreateImage(vmdkPath); err != nil {
+		t.Errorf("CreateImage: %s", err)
+	}
+
+	// the image will be saved to the Config's temp directory
+	tmpdir, err := conf.TempDir()
+	if err != nil {
+		t.Error(err)
+	}
+	expImagePath := filepath.Join(tmpdir, "image")
+
+	if conf.Image != expImagePath {
+		t.Errorf("CreateImage: expected ImagePath to be: %s got: %s",
+			expImagePath, conf.Image)
+	}
+
+	// Make sure the sha1 sum is correct
+
+	h := sha1.New()
+	f, err := os.Open(conf.Image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(h, f); err != nil {
+		t.Fatal(err)
+	}
+	sum := fmt.Sprintf("%x", h.Sum(nil))
+
+	if conf.Sha1sum != sum {
+		t.Error("CreateImage: expected sha1: %s got: %s", sum, conf.Sha1sum)
+	}
+}
+
 func readFile(name string) (string, error) {
 	b, err := ioutil.ReadFile(name)
 	return string(b), err
@@ -178,4 +293,34 @@ func TestRemoveItemBlock(t *testing.T) {
 				x.name, exp, s)
 		}
 	}
+}
+
+// extractGzipArchive, extracts the tgz archive name to a temp directory
+// returning the filepath of the temp directory.
+func extractGzipArchive(t *testing.T, name string) string {
+	t.Logf("extractGzipArchive: extracting tgz: %s", name)
+
+	tmpdir, err := ioutil.TempDir("", "test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("extractGzipArchive: using temp directory: %s", tmpdir)
+
+	f, err := os.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	w, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ExtractArchive(w, tmpdir); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return tmpdir
 }
