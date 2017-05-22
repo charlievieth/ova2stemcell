@@ -570,21 +570,25 @@ cloud_properties:
 
 func ExtractOVA(ova, dirname string) error {
 	Debugf("extracting ova file (%s) to directory: %s", ova, dirname)
-
 	tf, err := os.Open(ova)
 	if err != nil {
 		return err
 	}
 	defer tf.Close()
+	return ExtractArchive(tf, dirname)
+}
 
-	tr := tar.NewReader(tf)
+func ExtractArchive(archive io.Reader, dirname string) error {
+	Debugf("extracting archive to directory: %s", dirname)
+
+	tr := tar.NewReader(archive)
 
 	limit := 100
 	for ; limit >= 0; limit-- {
 		h, err := tr.Next()
 		if err != nil {
 			if err != io.EOF {
-				return fmt.Errorf("tar: reading from archive (%s): %s", ova, err)
+				return fmt.Errorf("tar: reading from archive: %s", err)
 			}
 			break
 		}
