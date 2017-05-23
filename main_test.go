@@ -307,41 +307,6 @@ func readFile(name string) (string, error) {
 	return string(b), err
 }
 
-var ovfXMLTests = []struct {
-	name string
-	err  error
-}{
-	{"full", nil},
-	{"short", nil},
-	{"no-ethernet-block", ErrElementNotFound},
-	{"multiple-ethernet-blocks", ErrMultipleElementsFound},
-}
-
-func TestRemoveItemBlock(t *testing.T) {
-	for _, x := range ovfXMLTests {
-		base := fmt.Sprintf("testdata/ovf/%s", x.name)
-		orig, err := readFile(base + ".orig.xml")
-		if err != nil {
-			t.Fatal(err)
-		}
-		exp, err := readFile(base + ".exp.xml")
-		if err != nil {
-			t.Fatal(err)
-		}
-		s, err := RemoveItemBlock(orig, "ethernet0")
-		if err != x.err {
-			t.Errorf("RemoveItemBlock (%s): want error: %v got: %v", x.name, x.err, err)
-			continue
-		}
-		if s != exp {
-			t.Fatalf("RemoveItemBlock (%s):\n"+
-				"--- WANT BEGIN ---\n%s\n---WANT END ---\n\n"+
-				"--- GOT BEGIN ---\n%s\n---GOT END ---\n",
-				x.name, exp, s)
-		}
-	}
-}
-
 // extractGzipArchive, extracts the tgz archive name to a temp directory
 // returning the filepath of the temp directory.
 func extractGzipArchive(t *testing.T, name string) string {
