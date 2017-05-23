@@ -323,7 +323,11 @@ func (c *Config) Stop() {
 }
 
 func (c *Config) Cleanup() {
-	if c.tmpdir != "" {
+	if c.tmpdir == "" {
+		return
+	}
+	// check if directory exists to make Cleanup idempotent
+	if _, err := os.Stat(c.tmpdir); err == nil {
 		Debugf("deleting temp directory: %s", c.tmpdir)
 		os.RemoveAll(c.tmpdir)
 	}
@@ -682,20 +686,9 @@ func realMain(c *Config, vhd, delta, version string) error {
 		return err
 	}
 
-	vmxPath := filepath.Join(tmpdir, "image.vmx")
-	if err := WriteVMXTemplate(patchedVMDK, vmxPath); err != nil {
+	if err := c.CreateImage(patchedVMDK); err != nil {
 		return err
 	}
-
-	ovaPath := filepath.Join(tmpdir, "image.ova")
-	if err := c.ConvertVMX2OVA(vmxPath, ovaPath); err != nil {
-		return err
-	}
-
-	ovfDir := filepath.Join(tmpdir, "ovf")
-	os.Mkdir(ovfDir, 0755)
-	_ = OvfDir
-
 	if err := c.WriteManifest(); err != nil {
 		return err
 	}
@@ -741,12 +734,11 @@ func main() {
 
 	// cleanup if interupted
 	go func() {
-		// WARN Make sure we don't exit for things like
-		// TERMINAL signals
 		ch := make(chan os.Signal, 64)
-		signal.Notify(ch)
+		signal.Notify(ch, os.Interrupt)
 		stopping := false
 		for sig := range ch {
+			Debugf("recieved signal: %s", sig)
 			if stopping {
 				fmt.Fprintf(os.Stderr, "recieved second (%s) signale - exiting now\n", sig)
 				os.Exit(1)
@@ -758,10 +750,9 @@ func main() {
 	}()
 
 	if err := realMain(&c, VHDFile, DeltaFile, Version); err != nil {
-		c.Cleanup()
-		// FOO
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 	}
-
+	c.Cleanup() // remove temp dir
 }
 
 var (
