@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -253,6 +254,52 @@ func TestCreateImage(t *testing.T) {
 	if conf.Sha1sum != sum {
 		t.Error("CreateImage: expected sha1: %s got: %s", sum, conf.Sha1sum)
 	}
+
+	// extract image
+	{
+		// expect the image ova to contain only the following file names
+		expectedNames := []string{
+			"image.ovf",
+			"image.mf",
+			"image-disk1.vmdk",
+		}
+
+		imageDir := extractGzipArchive(t, conf.Image)
+		list, err := ioutil.ReadDir(imageDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var names []string
+		infos := make(map[string]os.FileInfo)
+		for _, fi := range list {
+			names = append(names, fi.Name())
+			infos[fi.Name()] = fi
+		}
+
+		if len(names) != 3 {
+			t.Errorf("CreateImage: expected image (%s) to contain 3 files, found: %d - %s",
+				imageDir, len(names), names)
+		}
+		for _, name := range expectedNames {
+			if _, ok := infos[name]; !ok {
+				t.Errorf("CreateImage: image (%s) is missing file: %s", names, name)
+			}
+		}
+
+		// the vmx template should generate an ovf file that does not
+		// contain an ethernet section.
+		//
+		ovf := filepath.Join(imageDir, "image.ovf")
+		s, err := readFile(ovf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToLower(s), "ethernet") {
+			t.Errorf("CreateImage: ovf contains 'ethernet':\n%s\n", s)
+		}
+	}
+
 }
 
 func readFile(name string) (string, error) {
