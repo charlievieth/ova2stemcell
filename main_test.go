@@ -185,32 +185,6 @@ func TestApplyPatch(t *testing.T) {
 			t.Error("ApplyPatch: expected an error when the VMDK already exists got")
 		}
 	}
-
-	// Cancel: test that all readers and writers are wrapped with Cancel* types.
-	{
-		if err := os.Remove(newVMDK); err != nil {
-			t.Fatal(err)
-		}
-
-		tmpdir, err := conf.TempDir()
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		errCh := make(chan error, 1)
-		go func() { errCh <- conf.ApplyPatch(vhd, delta, newVMDK) }()
-		conf.Stop() // trigger cancelation of reads/writes
-
-		if err := <-errCh; err != ErrInterupt {
-			t.Errorf("ApplyPatch: Config Stopped: expected error: %v got: %v",
-				ErrInterupt, err)
-		}
-
-		if _, err := os.Stat(tmpdir); !os.IsNotExist(err) {
-			t.Errorf("ApplyPatch: Config did not delete it's temp dir (%s) after "+
-				"being stopped:", tmpdir)
-		}
-	}
 }
 
 func TestCreateImage(t *testing.T) {

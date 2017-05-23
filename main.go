@@ -490,34 +490,14 @@ func (c *Config) ConvertVMX2OVA(vmx, ova string) error {
 func (c *Config) ApplyPatch(vhd, delta, vmdk string) error {
 	Debugf("preparing to apply patch: vhd: %s delta: %s vmdk: %s", vhd, delta, vmdk)
 
-	// vhd file
-	fv, err := os.Open(vhd)
-	if err != nil {
-		return fmt.Errorf("opening [vhd] file: %s", err)
+	if _, err := os.Stat(vmdk); err == nil {
+		return fmt.Errorf("creating [vmdk] file: file exists: %s", vmdk)
 	}
-	defer fv.Close()
-	rsv := &CancelReadSeeker{stop: c.stop, rs: fv}
-
-	// delta file
-	fd, err := os.Open(delta)
-	if err != nil {
-		return fmt.Errorf("opening [delta] file: %s", err)
-	}
-	defer fd.Close()
-	rd := &CancelReader{stop: c.stop, r: fd}
-
-	// vmdk file
-	fk, err := os.OpenFile(vmdk, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("creating [vmdk] file: %s", err)
-	}
-	defer fk.Close()
-	wk := &CancelWriter{stop: c.stop, w: fk}
 
 	start := time.Now() // this is sometimes interesting
 
 	Debugf("applying patch with rdiff")
-	if err := Patch(rsv, rd, wk); err != nil {
+	if err := Patch(vhd, delta, vmdk); err != nil {
 		return err
 	}
 
